@@ -27,23 +27,6 @@ type MaterialType = 'gold' | 'rosegold' | 'platinum' | 'custom';
 type CameraPreset = 'front' | 'side' | 'top' | 'detail' | 'iso';
 type LightingPreset = 'studio' | 'dramatic' | 'soft' | 'natural';
 
-const STORE_MODELS = [
-  {
-    id: 'ring-3-diamonds',
-    name: 'Ring with 3 Diamonds',
-    url: 'https://skfb.ly/WBrK',
-    thumbnail: 'https://media.sketchfab.com/models/ring-3-diamonds/thumbnails/thumbnail.jpg',
-    description: 'Ring modeled in rhino with 3 diamonds'
-  },
-  {
-    id: 'golden-ring',
-    name: 'Golden Ring',
-    url: 'https://skfb.ly/6oFAF',
-    thumbnail: 'https://media.sketchfab.com/models/golden-ring/thumbnails/thumbnail.jpg',
-    description: 'Jewelry golden ring'
-  }
-];
-
 // Helper to get theme color based on material
 const getThemeColor = (material: MaterialType, customColor?: string): string => {
   if (material === 'custom' && customColor) {
@@ -63,6 +46,8 @@ export default function JewelleryViewer() {
   const [loading, setLoading] = useState(true);
   const [autoRotate, setAutoRotate] = useState(true);
   const [currentMaterial, setCurrentMaterial] = useState<MaterialType>('gold');
+  const [customColor, setCustomColor] = useState<string>('#FFD700');
+  const [showColorPicker, setShowColorPicker] = useState(false);
   const [cameraPreset, setCameraPreset] = useState<CameraPreset>('front');
   const [lightingPreset, setLightingPreset] = useState<LightingPreset>('studio');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -70,6 +55,8 @@ export default function JewelleryViewer() {
   const [fps, setFps] = useState(60);
   const [modelInfo, setModelInfo] = useState<{ vertices: number; faces: number; materials: number } | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  
+  const themeColor = getThemeColor(currentMaterial, customColor);
   
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -486,9 +473,140 @@ export default function JewelleryViewer() {
     setModelInfo({ vertices, faces, materials });
   };
 
-  const setMaterial = (type: MaterialType) => {
+  const loadModelFromURL = useCallback(async (url: string) => {
+    if (!sceneRef.current) return;
+    
+    setLoading(true);
+    try {
+      const loader = new GLTFLoader();
+      let modelUrl = url;
+      
+      // Handle Sketchfab short URLs - try to get direct download
+      if (url.includes('skfb.ly')) {
+        const modelId = url.split('/').pop()?.split('?')[0];
+        
+        // Try using a CORS proxy to fetch the model
+        // Note: This is a workaround - in production, use Sketchfab API or direct GLB URLs
+        try {
+          // Attempt to use Sketchfab's embed API endpoint (may require authentication)
+          // For public models, we can try the download endpoint
+          const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://sketchfab.com/models/${modelId}/embed`)}`;
+          
+          // For now, show a user-friendly message instead of alert
+          console.warn('Sketchfab model loading:', {
+            modelId,
+            message: 'Direct GLB/GLTF URL or Sketchfab API access required'
+          });
+          
+          // Show loading message but don't actually load (would need proper API)
+          setTimeout(() => {
+            setLoading(false);
+            // You can add a toast notification here instead of alert
+            const message = `To load this Sketchfab model, you need:\n• Direct GLB/GLTF download URL, or\n• Sketchfab API access\n\nModel ID: ${modelId}`;
+            // Using a more user-friendly approach - just log and don't show alert
+            console.info(message);
+          }, 500);
+          return;
+        } catch (err) {
+          console.error('Error processing Sketchfab URL:', err);
+          setLoading(false);
+          return;
+        }
+      }
+      
+      // Load model from direct URL
+      loader.load(
+        modelUrl,
+        (gltf) => {
+          if (!sceneRef.current) return;
+          
+          // Remove old model
+          if (currentModelRef.current && currentModelRef.current !== defaultRingRef.current) {
+            sceneRef.current.remove(currentModelRef.current);
+          }
+          
+          const model = gltf.scene;
+          
+          // Auto-center and scale
+          const box = new THREE.Box3().setFromObject(model);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          
+          model.position.x -= center.x;
+          model.position.y -= center.y;
+          model.position.z -= center.z;
+          
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const scaleFactor = 2 / maxDim;
+          model.scale.set(scaleFactor, scaleFactor, scaleFactor);
+          
+          // Apply environment map and materials
+          let vertices = 0;
+          let faces = 0;
+          let materials = 0;
+          
+          model.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.castShadow = false;
+              child.receiveShadow = false;
+              
+              const geo = child.geometry;
+              if (geo.attributes.position) {
+                vertices += geo.attributes.position.count;
+              }
+              if (geo.index) {
+                faces += geo.index.count / 3;
+              } else {
+                faces += geo.attributes.position.count / 3;
+              }
+              
+              if (child.material) {
+                materials++;
+                const material = child.material;
+                if (material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhysicalMaterial) {
+                  if (envMapRef.current) {
+                    material.envMap = envMapRef.current;
+                    material.envMapIntensity = 0.8;
+                    material.needsUpdate = true;
+                  }
+                }
+              }
+            }
+          });
+          
+          sceneRef.current.add(model);
+          currentModelRef.current = model;
+          setModelInfo({ vertices, faces, materials });
+          setLoading(false);
+          setCameraPreset('front');
+        },
+        undefined,
+        (error) => {
+          console.error('Error loading model:', error);
+          // Don't show alert, just log and stop loading
+          setLoading(false);
+        }
+      );
+    } catch (error) {
+      console.error('Error:', error);
+      setLoading(false);
+    }
+  }, []);
+
+  const setMaterial = (type: MaterialType, color?: string) => {
     setCurrentMaterial(type);
-    const settings = CONFIG.materials[type];
+    if (type === 'custom' && color) {
+      setCustomColor(color);
+    }
+    
+    const colorHex = type === 'custom' && color 
+      ? parseInt(color.replace('#', ''), 16)
+      : CONFIG.materials[type as keyof typeof CONFIG.materials]?.color || 0xFFD700;
+    
+    const settings = type === 'custom' 
+      ? { color: colorHex, metalness: 0.9, roughness: 0.3, envMapIntensity: 0.8 }
+      : CONFIG.materials[type as keyof typeof CONFIG.materials];
+    
     if (!settings || !currentModelRef.current) return;
 
     const model = currentModelRef.current;
@@ -671,9 +789,9 @@ export default function JewelleryViewer() {
       <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-4 md:p-6">
         {/* Header */}
         <div className="flex justify-between items-start gap-4 flex-wrap">
-          <div className="pointer-events-auto glass-panel border-l-4 border-yellow-500">
+          <div className="pointer-events-auto glass-panel" style={{ borderLeft: `4px solid ${themeColor}` }}>
             <h1 className="text-xl md:text-2xl font-light text-white tracking-wider">
-              JEWELLERY <span className="font-bold text-yellow-500">STUDIO</span>
+              JEWELLERY <span style={{ color: themeColor }} className="font-bold">STUDIO</span>
             </h1>
             <p className="text-xs text-gray-400 mt-1">Interactive 3D POC</p>
           </div>
@@ -693,7 +811,11 @@ export default function JewelleryViewer() {
               <div className="flex gap-2">
                 <button
                   onClick={toggleFullscreen}
-                  className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-500 rounded text-xs uppercase tracking-wider transition-colors"
+                  style={{ 
+                    backgroundColor: `${themeColor}20`,
+                    color: themeColor
+                  }}
+                  className="px-3 py-1.5 rounded text-xs uppercase tracking-wider transition-colors hover:opacity-80"
                   title="Fullscreen (F)"
                 >
                   ⛶
@@ -701,18 +823,22 @@ export default function JewelleryViewer() {
                 <button
                   onClick={captureScreenshot}
                   disabled={isCapturing}
-                  className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-500 rounded text-xs uppercase tracking-wider transition-colors disabled:opacity-50"
+                  style={{ 
+                    backgroundColor: `${themeColor}20`,
+                    color: themeColor
+                  }}
+                  className="px-3 py-1.5 rounded text-xs uppercase tracking-wider transition-colors disabled:opacity-50 hover:opacity-80"
                   title="Screenshot (C)"
                 >
                   {isCapturing ? '⏳' : '📷'}
                 </button>
                 <button
                   onClick={() => setShowStats(!showStats)}
-                  className={`px-3 py-1.5 rounded text-xs uppercase tracking-wider transition-colors ${
-                    showStats 
-                      ? 'bg-yellow-500/30 text-yellow-500' 
-                      : 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-500'
-                  }`}
+                  style={{ 
+                    backgroundColor: showStats ? `${themeColor}30` : `${themeColor}20`,
+                    color: themeColor
+                  }}
+                  className="px-3 py-1.5 rounded text-xs uppercase tracking-wider transition-colors hover:opacity-80"
                   title="Stats (S)"
                 >
                   📊
@@ -729,12 +855,13 @@ export default function JewelleryViewer() {
             {/* Material Selector */}
             <div className="pointer-events-auto glass-panel">
               <div className="text-xs text-gray-400 uppercase tracking-widest mb-3">Metal Material</div>
-              <div className="flex gap-4">
+              <div className="flex gap-4 flex-wrap">
                 <button
                   className={`metal-btn ${currentMaterial === 'gold' ? 'active' : ''}`}
                   onClick={() => setMaterial('gold')}
                   style={{
-                    background: 'linear-gradient(135deg, #FFD700, #FDB931)'
+                    background: 'linear-gradient(135deg, #FFD700, #FDB931)',
+                    borderColor: currentMaterial === 'gold' ? themeColor : 'rgba(255, 255, 255, 0.2)'
                   }}
                   title="Yellow Gold"
                 />
@@ -742,7 +869,8 @@ export default function JewelleryViewer() {
                   className={`metal-btn ${currentMaterial === 'rosegold' ? 'active' : ''}`}
                   onClick={() => setMaterial('rosegold')}
                   style={{
-                    background: 'linear-gradient(135deg, #E0BFB8, #B76E79)'
+                    background: 'linear-gradient(135deg, #E0BFB8, #B76E79)',
+                    borderColor: currentMaterial === 'rosegold' ? themeColor : 'rgba(255, 255, 255, 0.2)'
                   }}
                   title="Rose Gold"
                 />
@@ -750,24 +878,68 @@ export default function JewelleryViewer() {
                   className={`metal-btn ${currentMaterial === 'platinum' ? 'active' : ''}`}
                   onClick={() => setMaterial('platinum')}
                   style={{
-                    background: 'linear-gradient(135deg, #E5E4E2, #FFFFFF)'
+                    background: 'linear-gradient(135deg, #E5E4E2, #FFFFFF)',
+                    borderColor: currentMaterial === 'platinum' ? themeColor : 'rgba(255, 255, 255, 0.2)'
                   }}
                   title="Platinum"
                 />
+                <button
+                  className={`metal-btn ${currentMaterial === 'custom' ? 'active' : ''}`}
+                  onClick={() => setShowColorPicker(!showColorPicker)}
+                  style={{
+                    background: `linear-gradient(135deg, ${customColor}, ${customColor}dd)`,
+                    borderColor: currentMaterial === 'custom' ? themeColor : 'rgba(255, 255, 255, 0.2)'
+                  }}
+                  title="Custom Color"
+                >
+                  🎨
+                </button>
               </div>
+              
+              {/* Color Picker */}
+              {showColorPicker && (
+                <div className="mt-4 pt-4 border-t border-gray-700">
+                  <div className="text-xs text-gray-400 uppercase tracking-widest mb-2">Custom Color</div>
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="color"
+                      value={customColor}
+                      onChange={(e) => {
+                        setCustomColor(e.target.value);
+                        setMaterial('custom', e.target.value);
+                      }}
+                      className="w-12 h-8 rounded cursor-pointer"
+                    />
+                    <input
+                      type="text"
+                      value={customColor}
+                      onChange={(e) => {
+                        if (/^#[0-9A-F]{6}$/i.test(e.target.value)) {
+                          setCustomColor(e.target.value);
+                          setMaterial('custom', e.target.value);
+                        }
+                      }}
+                      className="flex-1 px-2 py-1 bg-gray-800 text-white text-xs rounded border border-gray-600"
+                      placeholder="#FFD700"
+                    />
+                  </div>
+                </div>
+              )}
+              
               <div className="mt-4 pt-4 border-t border-gray-700 space-y-2">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={autoRotate}
                     onChange={(e) => setAutoRotate(e.target.checked)}
-                    className="accent-yellow-500"
+                    style={{ accentColor: themeColor }}
                   />
                   <span className="text-sm text-gray-300">Auto Rotate (R)</span>
                 </label>
                 <button
                   onClick={zoomToFit}
-                  className="text-xs text-yellow-500 hover:text-white underline decoration-dashed w-full text-left"
+                  style={{ color: themeColor }}
+                  className="text-xs hover:text-white underline decoration-dashed w-full text-left transition-colors"
                 >
                   Zoom to Fit
                 </button>
@@ -782,11 +954,11 @@ export default function JewelleryViewer() {
                   <button
                     key={preset}
                     onClick={() => setCameraPreset(preset)}
-                    className={`px-3 py-2 text-xs uppercase tracking-wider rounded transition-colors ${
-                      cameraPreset === preset
-                        ? 'bg-yellow-500 text-black'
-                        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700'
-                    }`}
+                    style={{
+                      backgroundColor: cameraPreset === preset ? themeColor : 'rgba(55, 65, 81, 0.5)',
+                      color: cameraPreset === preset ? '#000' : '#d1d5db'
+                    }}
+                    className="px-3 py-2 text-xs uppercase tracking-wider rounded transition-colors hover:opacity-80"
                     title={`${preset.charAt(0).toUpperCase() + preset.slice(1)} View`}
                   >
                     {preset}
@@ -803,11 +975,11 @@ export default function JewelleryViewer() {
                   <button
                     key={preset}
                     onClick={() => setLightingPreset(preset)}
-                    className={`px-3 py-2 text-xs uppercase tracking-wider rounded transition-colors ${
-                      lightingPreset === preset
-                        ? 'bg-yellow-500 text-black'
-                        : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700'
-                    }`}
+                    style={{
+                      backgroundColor: lightingPreset === preset ? themeColor : 'rgba(55, 65, 81, 0.5)',
+                      color: lightingPreset === preset ? '#000' : '#d1d5db'
+                    }}
+                    className="px-3 py-2 text-xs uppercase tracking-wider rounded transition-colors hover:opacity-80"
                   >
                     {preset}
                   </button>
@@ -832,6 +1004,7 @@ export default function JewelleryViewer() {
             </div>
           </div>
         )}
+
       </div>
     </div>
   );
